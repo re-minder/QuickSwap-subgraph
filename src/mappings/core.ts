@@ -1,5 +1,5 @@
 /* eslint-disable prefer-const */
-import { BigInt, BigDecimal, store, Address } from '@graphprotocol/graph-ts'
+import { BigInt, BigDecimal, store, Address, log } from '@graphprotocol/graph-ts'
 import {
   Pair,
   Token,
@@ -9,8 +9,8 @@ import {
   Burn as BurnEvent,
   Swap as SwapEvent,
   Bundle
-} from '../types/schema'
-import { Pair as PairContract, Mint, Burn, Swap, Transfer, Sync } from '../types/templates/Pair/Pair'
+} from '../../generated/schema'
+import { Pair as PairContract, Mint, Burn, Swap, Transfer, Sync } from '../../generated/templates/Pair/Pair'
 import { updatePairDayData, updateTokenDayData, updateUniswapDayData, updatePairHourData } from './dayUpdates'
 import { getEthPriceInUSD, findEthPerToken, getTrackedVolumeUSD, getTrackedLiquidityUSD } from './pricing'
 import {
@@ -26,7 +26,11 @@ import {
 } from './helpers'
 
 function isCompleteMint(mintId: string): boolean {
-  return MintEvent.load(mintId).sender !== null // sufficient checks
+  let mint = MintEvent.load(mintId)
+  if (mint == null) {
+    return false
+  }
+  return mint.sender !== null // sufficient checks
 }
 
 export function handleTransfer(event: Transfer): void {
@@ -36,6 +40,10 @@ export function handleTransfer(event: Transfer): void {
   }
 
   let factory = UniswapFactory.load(FACTORY_ADDRESS)
+  if (factory == null) {
+    log.error('Uniswap factory not found at address {}', [FACTORY_ADDRESS])
+    return
+  }
   let transactionHash = event.transaction.hash.toHexString()
 
   // user stats
@@ -46,6 +54,10 @@ export function handleTransfer(event: Transfer): void {
 
   // get pair and load contract
   let pair = Pair.load(event.address.toHexString())
+  if (pair == null) {
+    log.error('Pair not found on address {}', [event.address.toHex()])
+    return
+  }
   let pairContract = PairContract.bind(event.address)
 
   // liquidity token amount being transfered
@@ -130,6 +142,10 @@ export function handleTransfer(event: Transfer): void {
     let burn: BurnEvent
     if (burns.length > 0) {
       let currentBurn = BurnEvent.load(burns[burns.length - 1])
+      if (currentBurn == null) {
+        log.error('Burn with index {} not found in array of burns', [(burns.length - 1).toString()])
+        return
+      }
       if (currentBurn.needsComplete) {
         burn = currentBurn as BurnEvent
       } else {
@@ -164,6 +180,10 @@ export function handleTransfer(event: Transfer): void {
     // if this logical burn included a fee mint, account for this
     if (mints.length !== 0 && !isCompleteMint(mints[mints.length - 1])) {
       let mint = MintEvent.load(mints[mints.length - 1])
+      if (mint == null) {
+        log.error('Mint with index {} not found in array of burns', [(mints.length - 1).toString()])
+        return
+      }
       burn.feeTo = mint.to
       burn.feeLiquidity = mint.liquidity
       // remove the logical mint
@@ -212,9 +232,25 @@ export function handleTransfer(event: Transfer): void {
 
 export function handleSync(event: Sync): void {
   let pair = Pair.load(event.address.toHex())
+  if (pair == null) {
+    log.error('Pair not found on address {}', [event.address.toHex()])
+    return
+  }
   let token0 = Token.load(pair.token0)
+  if (token0 == null) {
+    log.error('Token not found on address {}', [pair.token0])
+    return
+  }
   let token1 = Token.load(pair.token1)
+  if (token1 == null) {
+    log.error('Token not found on address {}', [pair.token1])
+    return
+  }
   let uniswap = UniswapFactory.load(FACTORY_ADDRESS)
+  if (uniswap == null) {
+    log.error('Uniswap Factory not found on address {}', [FACTORY_ADDRESS])
+    return
+  }
 
   // reset factory liquidity by subtracting onluy tarcked liquidity
   uniswap.totalLiquidityETH = uniswap.totalLiquidityETH.minus(pair.trackedReserveETH as BigDecimal)
@@ -235,6 +271,10 @@ export function handleSync(event: Sync): void {
 
   // update ETH price now that reserves could have changed
   let bundle = Bundle.load('1')
+  if (bundle == null) {
+    log.error("Bundle '1' not found", [])
+    return
+  }
   bundle.ethPrice = getEthPriceInUSD()
   bundle.save()
 
@@ -246,18 +286,27 @@ export function handleSync(event: Sync): void {
   // get tracked liquidity - will be 0 if neither is in whitelist
   let trackedLiquidityETH: BigDecimal
   if (bundle.ethPrice.notEqual(ZERO_BD)) {
-    trackedLiquidityETH = getTrackedLiquidityUSD(pair.reserve0, token0 as Token, pair.reserve1, token1 as Token, bundle as Bundle).div(
-      bundle.ethPrice
-    )
+    trackedLiquidityETH = getTrackedLiquidityUSD(
+      pair.reserve0,
+      token0 as Token,
+      pair.reserve1,
+      token1 as Token,
+      bundle as Bundle
+    ).div(bundle.ethPrice)
   } else {
     trackedLiquidityETH = ZERO_BD
   }
 
   // use derived amounts within pair
   pair.trackedReserveETH = trackedLiquidityETH
-  pair.reserveETH = pair.reserve0
-    .times(token0.derivedETH as BigDecimal)
-    .plus(pair.reserve1.times(token1.derivedETH as BigDecimal))
+  if (token0.derivedETH === null) {
+    token0.derivedETH = BigDecimal.fromString('0')
+  }
+  if (token1.derivedETH === null) {
+    token1.derivedETH = BigDecimal.fromString('0')
+  }
+
+  pair.reserveETH = pair.reserve0.times(token0.derivedETH!).plus(pair.reserve1.times(token1.derivedETH!))
   pair.reserveUSD = pair.reserveETH.times(bundle.ethPrice)
 
   // use tracked amounts globally
@@ -277,14 +326,38 @@ export function handleSync(event: Sync): void {
 
 export function handleMint(event: Mint): void {
   let transaction = Transaction.load(event.transaction.hash.toHexString())
+  if (transaction == null) {
+    log.error('Transaction {} not found', [event.transaction.hash.toHex()])
+    return
+  }
   let mints = transaction.mints
   let mint = MintEvent.load(mints[mints.length - 1])
+  if (mint == null) {
+    log.error('Mint with index {} not found in array of burns', [(mints.length - 1).toString()])
+    return
+  }
 
   let pair = Pair.load(event.address.toHex())
+  if (pair == null) {
+    log.error('Pair not found on address {}', [event.address.toHex()])
+    return
+  }
   let uniswap = UniswapFactory.load(FACTORY_ADDRESS)
+  if (uniswap == null) {
+    log.error('Uniswap Factory not found on address {}', [FACTORY_ADDRESS])
+    return
+  }
 
   let token0 = Token.load(pair.token0)
+  if (token0 == null) {
+    log.error('Token not found on address {}', [pair.token0])
+    return
+  }
   let token1 = Token.load(pair.token1)
+  if (token1 == null) {
+    log.error('Token not found on address {}', [pair.token1])
+    return
+  }
 
   // update exchange info (except balances, sync will cover that)
   let token0Amount = convertTokenToDecimal(event.params.amount0, token0.decimals)
@@ -296,9 +369,15 @@ export function handleMint(event: Mint): void {
 
   // get new amounts of USD and ETH for tracking
   let bundle = Bundle.load('1')
-  let amountTotalUSD = token1.derivedETH
-    .times(token1Amount)
-    .plus(token0.derivedETH.times(token0Amount))
+  if (bundle == null) {
+    log.error("Bundle '1' not found", [])
+    return
+  }
+  if (token0.derivedETH === null) token0.derivedETH = BigDecimal.fromString('0')
+  if (token1.derivedETH === null) token1.derivedETH = BigDecimal.fromString('0')
+  let amountTotalUSD = token1
+    .derivedETH!.times(token1Amount)
+    .plus(token0.derivedETH!.times(token0Amount))
     .times(bundle.ethPrice)
 
   // update txn counts
@@ -337,6 +416,10 @@ export function handleMint(event: Mint): void {
 
 export function handleBurn(event: Burn): void {
   let transaction = Transaction.load(event.transaction.hash.toHexString())
+  if (transaction == null) {
+    log.error('Transaction {} not found', [event.transaction.hash.toHex()])
+    return
+  }
 
   // safety check
   if (transaction === null) {
@@ -345,13 +428,33 @@ export function handleBurn(event: Burn): void {
 
   let burns = transaction.burns
   let burn = BurnEvent.load(burns[burns.length - 1])
+  if (burn == null) {
+    log.error('Burn with index {} not found in array of burns', [(burns.length - 1).toString()])
+    return
+  }
 
   let pair = Pair.load(event.address.toHex())
+  if (pair == null) {
+    log.error('Pair not found on address {}', [event.address.toHex()])
+    return
+  }
   let uniswap = UniswapFactory.load(FACTORY_ADDRESS)
+  if (uniswap == null) {
+    log.error('Uniswap Factory not found on address {}', [FACTORY_ADDRESS])
+    return
+  }
 
   //update token info
   let token0 = Token.load(pair.token0)
+  if (token0 == null) {
+    log.error('Token not found on address {}', [pair.token0])
+    return
+  }
   let token1 = Token.load(pair.token1)
+  if (token1 == null) {
+    log.error('Token not found on address {}', [pair.token1])
+    return
+  }
   let token0Amount = convertTokenToDecimal(event.params.amount0, token0.decimals)
   let token1Amount = convertTokenToDecimal(event.params.amount1, token1.decimals)
 
@@ -361,9 +464,15 @@ export function handleBurn(event: Burn): void {
 
   // get new amounts of USD and ETH for tracking
   let bundle = Bundle.load('1')
-  let amountTotalUSD = token1.derivedETH
-    .times(token1Amount)
-    .plus(token0.derivedETH.times(token0Amount))
+  if (bundle == null) {
+    log.error("Bundle '1' not found", [])
+    return
+  }
+  if (token0.derivedETH === null) token0.derivedETH = BigDecimal.fromString('0')
+  if (token1.derivedETH === null) token1.derivedETH = BigDecimal.fromString('0')
+  let amountTotalUSD = token1
+    .derivedETH!.times(token1Amount)
+    .plus(token0.derivedETH!.times(token0Amount))
     .times(bundle.ethPrice)
 
   // update txn counts
@@ -404,8 +513,20 @@ export function handleBurn(event: Burn): void {
 
 export function handleSwap(event: Swap): void {
   let pair = Pair.load(event.address.toHexString())
+  if (pair == null) {
+    log.error('Pair not found on address {}', [event.address.toHex()])
+    return
+  }
   let token0 = Token.load(pair.token0)
+  if (token0 == null) {
+    log.error('Token not found on address {}', [pair.token0])
+    return
+  }
   let token1 = Token.load(pair.token1)
+  if (token1 == null) {
+    log.error('Token not found on address {}', [pair.token1])
+    return
+  }
   let amount0In = convertTokenToDecimal(event.params.amount0In, token0.decimals)
   let amount1In = convertTokenToDecimal(event.params.amount1In, token1.decimals)
   let amount0Out = convertTokenToDecimal(event.params.amount0Out, token0.decimals)
@@ -417,16 +538,28 @@ export function handleSwap(event: Swap): void {
 
   // ETH/USD prices
   let bundle = Bundle.load('1')
+  if (bundle == null) {
+    log.error("Bundle '1' not found", [])
+    return
+  }
 
   // get total amounts of derived USD and ETH for tracking
-  let derivedAmountETH = token1.derivedETH
-    .times(amount1Total)
-    .plus(token0.derivedETH.times(amount0Total))
+  if (token0.derivedETH === null) token0.derivedETH = BigDecimal.fromString('0')
+  if (token1.derivedETH === null) token1.derivedETH = BigDecimal.fromString('0')
+  let derivedAmountETH = token1
+    .derivedETH!.times(amount1Total)
+    .plus(token0.derivedETH!.times(amount0Total))
     .div(BigDecimal.fromString('2'))
   let derivedAmountUSD = derivedAmountETH.times(bundle.ethPrice)
 
   // only accounts for volume through white listed tokens
-  let trackedAmountUSD = getTrackedVolumeUSD(amount0Total, token0 as Token, amount1Total, token1 as Token, bundle as Bundle)
+  let trackedAmountUSD = getTrackedVolumeUSD(
+    amount0Total,
+    token0 as Token,
+    amount1Total,
+    token1 as Token,
+    bundle as Bundle
+  )
 
   let trackedAmountETH: BigDecimal
   if (bundle.ethPrice.equals(ZERO_BD)) {
@@ -459,6 +592,10 @@ export function handleSwap(event: Swap): void {
 
   // update global values, only used tracked amounts for volume
   let uniswap = UniswapFactory.load(FACTORY_ADDRESS)
+  if (uniswap == null) {
+    log.error('Uniswap Factory not found on address {}', [FACTORY_ADDRESS])
+    return
+  }
   uniswap.totalVolumeUSD = uniswap.totalVolumeUSD.plus(trackedAmountUSD)
   uniswap.totalVolumeETH = uniswap.totalVolumeETH.plus(trackedAmountETH)
   uniswap.untrackedVolumeUSD = uniswap.untrackedVolumeUSD.plus(derivedAmountUSD)
@@ -539,17 +676,17 @@ export function handleSwap(event: Swap): void {
 
   // swap specific updating for token0
   token0DayData.dailyVolumeToken = token0DayData.dailyVolumeToken.plus(amount0Total)
-  token0DayData.dailyVolumeETH = token0DayData.dailyVolumeETH.plus(amount0Total.times(token0.derivedETH as BigDecimal))
+  token0DayData.dailyVolumeETH = token0DayData.dailyVolumeETH.plus(amount0Total.times(token0.derivedETH!))
   token0DayData.dailyVolumeUSD = token0DayData.dailyVolumeUSD.plus(
-    amount0Total.times(token0.derivedETH as BigDecimal).times(bundle.ethPrice)
+    amount0Total.times(token0.derivedETH!).times(bundle.ethPrice)
   )
   token0DayData.save()
 
   // swap specific updating
   token1DayData.dailyVolumeToken = token1DayData.dailyVolumeToken.plus(amount1Total)
-  token1DayData.dailyVolumeETH = token1DayData.dailyVolumeETH.plus(amount1Total.times(token1.derivedETH as BigDecimal))
+  token1DayData.dailyVolumeETH = token1DayData.dailyVolumeETH.plus(amount1Total.times(token1.derivedETH!))
   token1DayData.dailyVolumeUSD = token1DayData.dailyVolumeUSD.plus(
-    amount1Total.times(token1.derivedETH as BigDecimal).times(bundle.ethPrice)
+    amount1Total.times(token1.derivedETH!).times(bundle.ethPrice)
   )
   token1DayData.save()
 }

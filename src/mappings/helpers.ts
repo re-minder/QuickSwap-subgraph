@@ -1,10 +1,10 @@
 /* eslint-disable prefer-const */
 import { log, BigInt, BigDecimal, Address, ethereum } from '@graphprotocol/graph-ts'
-import { ERC20 } from '../types/Factory/ERC20'
-import { ERC20SymbolBytes } from '../types/Factory/ERC20SymbolBytes'
-import { ERC20NameBytes } from '../types/Factory/ERC20NameBytes'
-import { User, Bundle, Token, LiquidityPosition, LiquidityPositionSnapshot, Pair } from '../types/schema'
-import { Factory as FactoryContract } from '../types/templates/Pair/Factory'
+import { ERC20 } from '../../generated/Factory/ERC20'
+import { ERC20SymbolBytes } from '../../generated/Factory/ERC20SymbolBytes'
+import { ERC20NameBytes } from '../../generated/Factory/ERC20NameBytes'
+import { User, Bundle, Token, LiquidityPosition, LiquidityPositionSnapshot, Pair } from '../../generated/schema'
+import { Factory as FactoryContract } from '../../generated/templates/Pair/Factory'
 
 export const ADDRESS_ZERO = '0x0000000000000000000000000000000000000000'
 export const FACTORY_ADDRESS = '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32'
@@ -30,7 +30,7 @@ export function bigDecimalExp18(): BigDecimal {
 }
 
 export function convertEthToDecimal(eth: BigInt): BigDecimal {
-  return eth.toBigDecimal().div(exponentToBigDecimal(18))
+  return eth.toBigDecimal().div(exponentToBigDecimal(BigInt.fromI32(18)))
 }
 
 export function convertTokenToDecimal(tokenAmount: BigInt, exchangeDecimals: BigInt): BigDecimal {
@@ -107,24 +107,26 @@ export function fetchTokenName(tokenAddress: Address): string {
 
 export function fetchTokenTotalSupply(tokenAddress: Address): BigInt {
   let contract = ERC20.bind(tokenAddress)
-  let totalSupplyValue = null
   let totalSupplyResult = contract.try_totalSupply()
   if (!totalSupplyResult.reverted) {
-    totalSupplyValue = totalSupplyResult as i32
+    return totalSupplyResult.value
+  } else {
+    log.error('Total supply is unavailable for token with address {}', [tokenAddress.toHex()])
+    return BigInt.fromI32(0)
   }
-  return BigInt.fromI32(totalSupplyValue as i32)
 }
 
 export function fetchTokenDecimals(tokenAddress: Address): BigInt {
   // hardcode overrides
   let contract = ERC20.bind(tokenAddress)
   // try types uint8 for decimals
-  let decimalValue = null
   let decimalResult = contract.try_decimals()
   if (!decimalResult.reverted) {
-    decimalValue = decimalResult.value
+    return BigInt.fromI32(decimalResult.value)
+  } else {
+    log.error('Decimals number is unavailable for token with address {}', [tokenAddress.toHex()])
+    return BigInt.fromI32(18)
   }
-  return BigInt.fromI32(decimalValue as i32)
 }
 
 export function createLiquidityPosition(exchange: Address, user: Address): LiquidityPosition {
@@ -135,6 +137,10 @@ export function createLiquidityPosition(exchange: Address, user: Address): Liqui
   let liquidityTokenBalance = LiquidityPosition.load(id)
   if (liquidityTokenBalance === null) {
     let pair = Pair.load(exchange.toHexString())
+    if (pair === null) {
+      log.critical('Pair {} not found', [exchange.toHexString()])
+      return liquidityTokenBalance as LiquidityPosition
+    }
     pair.liquidityProviderCount = pair.liquidityProviderCount.plus(ONE_BI)
     liquidityTokenBalance = new LiquidityPosition(id)
     liquidityTokenBalance.liquidityTokenBalance = ZERO_BD
@@ -158,10 +164,36 @@ export function createUser(address: Address): void {
 
 export function createLiquiditySnapshot(position: LiquidityPosition, event: ethereum.Event): void {
   let timestamp = event.block.timestamp.toI32()
+
   let bundle = Bundle.load('1')
+  if (bundle === null) {
+    log.error('Bundle {} not found', [(1).toString()])
+    return
+  }
+
   let pair = Pair.load(position.pair)
+  if (pair === null) {
+    log.error('Pair {} not found', [position.pair])
+    return
+  }
+
   let token0 = Token.load(pair.token0)
+  if (token0 === null) {
+    log.error('Token {} not found', [pair.token0])
+    return
+  }
   let token1 = Token.load(pair.token1)
+  if (token1 === null) {
+    log.error('Token {} not found', [pair.token1])
+    return
+  }
+
+  if (token0.derivedETH === null) {
+    token0.derivedETH = BigDecimal.fromString('0')
+  }
+  if (token1.derivedETH === null) {
+    token1.derivedETH = BigDecimal.fromString('0')
+  }
 
   // create new snapshot
   let snapshot = new LiquidityPositionSnapshot(position.id.concat(timestamp.toString()))
@@ -169,8 +201,8 @@ export function createLiquiditySnapshot(position: LiquidityPosition, event: ethe
   snapshot.block = event.block.number.toI32()
   snapshot.user = position.user
   snapshot.pair = position.pair
-  snapshot.token0PriceUSD = token0.derivedETH.times(bundle.ethPrice)
-  snapshot.token1PriceUSD = token1.derivedETH.times(bundle.ethPrice)
+  snapshot.token0PriceUSD = token0.derivedETH!.times(bundle.ethPrice)
+  snapshot.token1PriceUSD = token1.derivedETH!.times(bundle.ethPrice)
   snapshot.reserve0 = pair.reserve0
   snapshot.reserve1 = pair.reserve1
   snapshot.reserveUSD = pair.reserveUSD

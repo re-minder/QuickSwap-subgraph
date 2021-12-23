@@ -1,7 +1,7 @@
-import { PairHourData } from './../types/schema'
+import { PairHourData } from './../../generated/schema'
 /* eslint-disable prefer-const */
 import { BigInt, BigDecimal, ethereum } from '@graphprotocol/graph-ts'
-import { Pair, Bundle, Token, UniswapFactory, UniswapDayData, PairDayData, TokenDayData } from '../types/schema'
+import { Pair, Bundle, Token, UniswapFactory, UniswapDayData, PairDayData, TokenDayData } from '../../generated/schema'
 import { ONE_BI, ZERO_BD, ZERO_BI, FACTORY_ADDRESS } from './helpers'
 
 export function updateUniswapDayData(uniswap: UniswapFactory, event: ethereum.Event): UniswapDayData {
@@ -98,21 +98,24 @@ export function updateTokenDayData(token: Token, event: ethereum.Event, bundle: 
     .concat('-')
     .concat(BigInt.fromI32(dayID).toString())
 
+  if (token.derivedETH === null) {
+    token.derivedETH = BigDecimal.fromString('0')
+  }
+
   let tokenDayData = TokenDayData.load(tokenDayID)
   if (tokenDayData === null) {
     tokenDayData = new TokenDayData(tokenDayID)
     tokenDayData.date = dayStartTimestamp
     tokenDayData.token = token.id
-    tokenDayData.priceUSD = token.derivedETH.times(bundle.ethPrice)
     tokenDayData.dailyVolumeToken = ZERO_BD
     tokenDayData.dailyVolumeETH = ZERO_BD
     tokenDayData.dailyVolumeUSD = ZERO_BD
     tokenDayData.dailyTxns = ZERO_BI
     tokenDayData.totalLiquidityUSD = ZERO_BD
   }
-  tokenDayData.priceUSD = token.derivedETH.times(bundle.ethPrice)
+  tokenDayData.priceUSD = token.derivedETH!.times(bundle.ethPrice)
   tokenDayData.totalLiquidityToken = token.totalLiquidity
-  tokenDayData.totalLiquidityETH = token.totalLiquidity.times(token.derivedETH as BigDecimal)
+  tokenDayData.totalLiquidityETH = token.totalLiquidity.times(token.derivedETH!)
   tokenDayData.totalLiquidityUSD = tokenDayData.totalLiquidityETH.times(bundle.ethPrice)
   tokenDayData.dailyTxns = tokenDayData.dailyTxns.plus(ONE_BI)
   //tokenDayData.save()
